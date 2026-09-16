@@ -72,11 +72,11 @@ pub(crate) struct AppSettings {
     pub(crate) retrieval_gating_profile: Option<String>,
     pub(crate) generation_refusal_mode: Option<String>,
     pub(crate) gating_retry_on_refusal: Option<bool>,
-    #[serde(default)]
-    pub(crate) index_filter: Option<memori_core::IndexFilterConfig>,
     /// OCR tesseract 可执行文件路径（审计 Q6）；启动时注入 `MEMORI_OCR_TESSERACT_PATH`。
     #[serde(default)]
     pub(crate) ocr_tesseract_path: Option<String>,
+    #[serde(default)]
+    pub(crate) index_filter: Option<memori_core::IndexFilterConfig>,
     // legacy fields for backwards compatibility
     pub(crate) provider: Option<String>,
     pub(crate) endpoint: Option<String>,

@@ -181,6 +181,15 @@ bench：`cargo run -p memori-core --example graph_bench -- <files>`（对每个 
 ### 关于 top1 文档 0.696（非 bug，已用 `top_documents` 诊断坐实）
 给 harness 加了 `top_documents` 字段（每题最终证据去重后的有序文档路径）。据此查实：**20 道 top1-miss 里 19 道，排第 1 的都是目标的"同项目兄弟文档"**（检索每次都准确锁定项目，只是没挑中套件指定的那个体裁）。根因是套件"直问-散文事实/改写"题**故意含糊**（只点项目名/代号、不点具体事实，答案关键词不在 query 里），rerank 无法在同项目 7 份文档间区分。**这是 v2 相对 v1 的刻意难度，不是融合/排序 bug；top3 0.913 / top5 片段 0.957 / MRR 0.830 说明召回与答案 chunk 入选均正常。** 把 top1-文档硬拉到 v1 的 ~0.875 只能靠"让 query 重新点名具体事实"=把 v2 退化回 v1 的易，违背 v2 初衷。
 
+## OCR 接入与边界（本 PR 落地）
+
+- **能力**：索引期对三类来源做 OCR（tesseract + `chi_sim`）——独立图片（`png`/`jpg`/`jpeg`）、**无文本层**的扫描件 PDF、DOCX 内嵌图（`word/media/*`）。识别文本与正文一起入库，之后走正常分块/检索。
+- **不做 OCR 的时机**：ask 期构造引用摘要、桌面端文件预览都**不触发 OCR**；OCR 只在索引期发生（避免同步阻塞回答链路与 UI）。
+- **配置路径**：环境变量 `MEMORI_OCR_TESSERACT_PATH`（最高优先）> `settings.json` 的 `ocr_tesseract_path` > PATH 自动探测。桌面端入口在「设置 → 模型」；服务端入口 `POST /api/settings/ocr-path`（operator 角色）。
+- **改配置后需要重建索引**：路径变更或首次安装 tesseract 后，**已入库**的图片与扫描件不会自动重跑 OCR，需触发重建。
+- **实测**（本机 tesseract + `chi_sim`，样本 `Memory_Test_V2/special_005_扫描件_苍岭_对账.pdf`）：每页解码出 1 张图、单页约 0.8s，能识别出「…项目的对账窗口为每月 8 号…」等正文；但**实体名会被误读**（`苍岭` → `苑岭/苔岭`）。结论：OCR 文本可用于**召回辅助**，不宜当作精确匹配/精确引用口径。
+- **已知边界**：混合型 PDF（有文本层 + 扫描页）不对扫描页 OCR；`ppt`/`xlsx` 内嵌图未接入；`CCITTFaxDecode`（G4 传真压缩，黑白扫描件常见）与 `JPXDecode`（JPEG2000）暂不支持；单图解码后像素上限 128 MB；位深只接受 8 bit/通道（其余跳过，避免把解码噪声写进知识库）。
+- **自动化验证**：`memori-core` 有真实扫描件的 OCR 端到端测试（`scanned_pdf_is_indexed_through_ocr_when_available`，**无 tesseract 时自动跳过**）；CI 的 Linux job 安装 `tesseract-ocr` + `tesseract-ocr-chi-sim`，保证该测试真实执行。
 ## 作答层 LLM-judge 基线（2026-08-24 新增）
 
 此前"答案题正确"只用 top-k 命中当代理（见上表注），**从不看答案文本**。`--judge` 档补齐该闭环：对应答题走真实问答管线生成答案，再由 chat 模型对照 `target_clues` 判 correct/partial/incorrect（correct=1、partial=0.5、incorrect=0），逐题理由写入报告。judge 实现见 `memori-core/src/answer_judge.rs`，harness 入口 `--judge`。
@@ -192,7 +201,9 @@ bench：`cargo run -p memori-core --example graph_bench -- <files>`（对每个 
 - **重排：未接入**（rerank_applied_rate=0%）——v2 满配基线的 bge-reranker-v2-m3 在本机不可用
 - 图谱端点置为不可达（快速失败，本机显存 6GB 无法同时承载图谱/嵌入/作答）
 
-### 结果（`docs/qa/retrieval_regression_v2_judge_report.json`，126 题同一次跑）
+### 结果（本地 `--judge` 跑数，126 题同一次跑）
+
+> 逐题明细（每题的 judge 判分与理由）**不入库**：这类文件每跑一次基准就整体重写，进仓库只会带来 diff 噪声与体积膨胀。需要存档时以 CI artifact / 附件形式提供；仓库里只保留下面的汇总指标。
 
 | 层 | 指标 | 值 |
 | --- | --- | ---: |
@@ -211,16 +222,6 @@ judge 判分成功率 106/106（应答题全部产出判定，零失败）。平
 - **检索召回 ≠ 答案正确**：top3 文档召回 0.877 的同时，答案正确率仅 0.401；**47 题"top3 已命中但答案判 incorrect"**——检索层指标无法暴露的作答盲区被 judge 精确量化。
 - 本跑与官方 v2 满配基线（reject 0.881、rerank 应用率 0.905）的差距主要来自两个环境缺口：**无 rerank**（gating 的 rerank 置信度放行失效，拒答正确率 0.635 显著低于满配）与 **1.5B 小模型作答**（正确率上限低）。故本数字是**受限配置的作答层下限基线**，不作为产品能力口径。
 - 复跑口径：满配环境（7B+ 作答、bge-reranker）下重跑 `--judge`，预期 answer_correct_rate 显著上升；两次跑可直接对比作答层真实增益。
-
-## OCR 接入与边界（本 PR 落地）
-
-- **能力**：索引期对三类来源做 OCR（tesseract + `chi_sim`）——独立图片（`png`/`jpg`/`jpeg`）、**无文本层**的扫描件 PDF、DOCX 内嵌图（`word/media/*`）。识别文本与正文一起入库，之后走正常分块/检索。
-- **不做 OCR 的时机**：ask 期构造引用摘要、桌面端文件预览都**不触发 OCR**；OCR 只在索引期发生（避免同步阻塞回答链路与 UI）。
-- **配置路径**：环境变量 `MEMORI_OCR_TESSERACT_PATH`（最高优先）> `settings.json` 的 `ocr_tesseract_path` > PATH 自动探测。桌面端入口在「设置 → 模型」；服务端入口 `POST /api/settings/ocr-path`（operator 角色）。
-- **改配置后需要重建索引**：路径变更或首次安装 tesseract 后，**已入库**的图片与扫描件不会自动重跑 OCR，需触发重建。
-- **实测**（本机 tesseract + `chi_sim`，样本 `Memory_Test_V2/special_005_扫描件_苍岭_对账.pdf`）：每页解码出 1 张图、单页约 0.8s，能识别出「…项目的对账窗口为每月 8 号…」等正文；但**实体名会被误读**（`苍岭` → `苑岭/苔岭`）。结论：OCR 文本可用于**召回辅助**，不宜当作精确匹配/精确引用口径。
-- **已知边界**：混合型 PDF（有文本层 + 扫描页）不对扫描页 OCR；`ppt`/`xlsx` 内嵌图未接入；`CCITTFaxDecode`（G4 传真压缩，黑白扫描件常见）与 `JPXDecode`（JPEG2000）暂不支持；单图解码后像素上限 128 MB；位深只接受 8 bit/通道（其余跳过，避免把解码噪声写进知识库）。
-- **自动化验证**：`memori-core` 有真实扫描件的 OCR 端到端测试（`scanned_pdf_is_indexed_through_ocr_when_available`，**无 tesseract 时自动跳过**）；CI 的 Linux job 安装 `tesseract-ocr` + `tesseract-ocr-chi-sim`，保证该测试真实执行。
 
 ## 下一步杠杆（仅记录，不在本轮）
 1. gating 对"单事实低词法覆盖"证据的放行（A 类）。
